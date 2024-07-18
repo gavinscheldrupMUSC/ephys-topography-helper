@@ -109,33 +109,35 @@ function ephys_topography()
             mkdir(saveFolder);
         end
 
-        % Check if last saved date is different from current date
-        if ~exist('lastSavedDate', 'var') || isempty(lastSavedDate) || ~strcmp(lastSavedDate, currentDate)
-            runCount = 1; % Reset run count for the new day
-        end
-        
-        % Generate the save name with the current run count
-        saveName = sprintf('Cell%d_%s', runCount, selectedImageName);
-        saveFilePath = fullfile(saveFolder, saveName);
-        
-        % Failsafe: Check if file already exists to prevent overwriting
-        if exist(saveFilePath, 'file')
-            warning('File already exists. Generating a new name to avoid overwriting.');
-            counter = 1;
-            while exist(saveFilePath, 'file')
-                saveName = sprintf('Cell%d_%s_%d', runCount, selectedImageName, counter);
-                saveFilePath = fullfile(saveFolder, saveName);
-                counter = counter + 1;
+        % Confirmation window for patch success
+        choice = questdlg('Patch successful?', 'Confirmation', 'Yes', 'No', 'Yes');
+
+        if strcmp(choice, 'Yes')
+            % Generate the save name with the current run count
+            saveName = sprintf('Cell%d_%s', runCount, selectedImageName);
+            imwrite(selectedImage, fullfile(saveFolder, saveName)); % Save in the current date folder
+
+            disp(['Edited image saved as ', fullfile(saveFolder, saveName)]);
+
+            % Increment the run count for the next run
+            runCount = runCount + 1;
+        else
+            % Create a subfolder for unsuccessful attempts
+            unsuccessfulFolder = fullfile(saveFolder, 'Unsuccessful attempts');
+            if ~exist(unsuccessfulFolder, 'dir')
+                mkdir(unsuccessfulFolder);
             end
+
+            % Count the number of attempt files in the unsuccessful folder
+            attemptFiles = dir(fullfile(unsuccessfulFolder, 'Attempt*.jpg'));
+            attemptCount = length(attemptFiles) + 1;
+
+            % Generate the save name for the attempt
+            saveName = sprintf('Attempt%d_%s', attemptCount, selectedImageName);
+            imwrite(selectedImage, fullfile(unsuccessfulFolder, saveName)); % Save in the unsuccessful folder
+
+            disp(['Edited image saved as ', fullfile(unsuccessfulFolder, saveName)]);
         end
-        
-        % Save the image
-        imwrite(selectedImage, saveFilePath);
-
-        disp(['Edited image saved as ', saveFilePath]);
-
-        % Increment the run count for the next run
-        runCount = runCount + 1;
 
         % Save the updated run count and last saved date to the file
         lastSavedDate = currentDate; % Update last saved date
@@ -144,8 +146,20 @@ function ephys_topography()
         % Close all figures at the end
         close all;
     end
+
+end
+
+% Function to manually set the run count
+function setRunCount(newCount)
+    runCountFilePath = 'runCount.mat';
+    if exist(runCountFilePath, 'file')
+        load(runCountFilePath, 'lastSavedDate');
+    else
+        lastSavedDate = datestr(now, 'mmddyyyy'); % Initialize with current date if file doesn't exist
+    end
+    runCount = newCount; % Set run count to the new value
+    save(runCountFilePath, 'runCount', 'lastSavedDate'); % Save updated run count and last saved date
 end
 
 % TO MANUALLY CHANGE RUN COUNT:  >> setRunCount(n)    n = INTEGER
 %setRunCount(1); % Reset the run count to 1 or any specific value
-
