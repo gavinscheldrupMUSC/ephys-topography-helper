@@ -4,7 +4,7 @@ function ephys_topography()
     [protocolCounter, reRecordCount, runCount, lastSavedDate] = initializeRunCount(runCountFilePath);
 
     % Verify folder existence and load images
-    imageFolder = 'C:\Users\gavin\Box Sync\Rinker Lab\People\Gavin Scheldrup\Projects\GS1-CRF ephys\MATLAB & Python scripts\PFC Atlas RAW';
+    imageFolder = 'C:\"insert path to atlas images here"';
     imageFiles = dir(fullfile(imageFolder, '*.jpg'));
 
     % Sort image files by number in the filename
@@ -55,7 +55,7 @@ end
 
 %% selectImage Function
 function [protocolCounter, reRecordCount, runCount, unsuccessfulAttemptCount] = selectImage(index, protocolCounter, reRecordCount, runCount, lastSavedDate, sortedFiles, imageFolder, runCountFilePath, unsuccessfulAttemptCount)
-baseSaveFolder = 'C:\Users\gavin\Box Sync\Rinker Lab\People\Gavin Scheldrup\Projects\GS1-CRF ephys\Ephys data';
+baseSaveFolder = 'C:\"path to save folder"';
 
 % Load the current unsuccessfulAttemptCount if it's not passed
 if nargin < 8 || isempty(unsuccessfulAttemptCount)
@@ -279,7 +279,7 @@ function saveImageToFolder(folderPath, imageName, image, runCount, currentDate)
 end
 
 function unsuccessfulAttemptCount = saveUnsuccessfulPatch(selectedImage, selectedImageName, runCountFilePath)
-    baseSaveFolder = 'C:\Users\gavin\Box Sync\Rinker Lab\People\Gavin Scheldrup\Projects\GS1-CRF ephys\Ephys data';
+    baseSaveFolder = 'C:\"path to save folder"';
     currentDate = datestr(now, 'mmddyyyy');
     saveFolder = fullfile(baseSaveFolder, currentDate, 'Unsuccessful attempts');
     
