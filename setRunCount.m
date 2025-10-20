@@ -37,28 +37,48 @@ function setRunCount(newCount, newUnsuccessfulAttemptCount)
             unsuccessfulAttemptCount = data.unsuccessfulAttemptCount;
         end
         
-        % Set all counts to the new value (if provided), or reset to 0
+        % If newCount is zero, reset all counters and prompt for animal info.
         if newCount == 0
             runCount = 0;
             protocolCounter = 0;
             reRecordCount = 0;
             unsuccessfulAttemptCount = 0;
+            
+            prompt = {'Enter animal name:', 'Enter animal sex (use M/F):'};
+            dlg_title = 'Reset Animal Info';
+            num_lines = 1;
+            defaultans = {'',''};
+            answer = inputdlg(prompt, dlg_title, num_lines, defaultans);
+            animalName = answer{1};
+            animalSex = answer{2};
         else
             runCount = newCount;
+            % If animal info exists, keep it; otherwise initialize as empty.
+            if isfield(data, 'animalName')
+                animalName = data.animalName;
+            else
+                animalName = '';
+            end
+            if isfield(data, 'animalSex')
+                animalSex = data.animalSex;
+            else
+                animalSex = '';
+            end
         end
         
-        % If the new unsuccessful attempt count is provided, update it
+        % Update unsuccessfulAttemptCount if provided
         if nargin > 1
             unsuccessfulAttemptCount = newUnsuccessfulAttemptCount;
         end
         
         % Save all variables back to the file
-        save(runCountFilePath, 'runCount', 'lastSavedDate', 'protocolCounter', 'reRecordCount', 'unsuccessfulAttemptCount');
+        save(runCountFilePath, 'runCount', 'lastSavedDate', 'protocolCounter', 'reRecordCount', 'unsuccessfulAttemptCount', 'animalName', 'animalSex');
         
         disp(['Run count has been set to ', num2str(runCount)]);
         disp(['Protocol counter has been set to ', num2str(protocolCounter)]);
         disp(['Re-record count has been set to ', num2str(reRecordCount)]);
         disp(['Unsuccessful attempt count is now ', num2str(unsuccessfulAttemptCount)]);
+        disp(['Animal Name: ', animalName, ', Animal Sex: ', animalSex]);
     else
         error('Run count file does not exist.');
     end

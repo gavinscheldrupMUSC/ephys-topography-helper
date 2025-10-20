@@ -1,24 +1,26 @@
 function ephys_topography()
-    % Initialization
-    runCountFilePath = 'runCount.mat';
-    [protocolCounter, reRecordCount, runCount, lastSavedDate] = initializeRunCount(runCountFilePath);
-
-    % Verify folder existence and load images
-    imageFolder = 'C:\"insert path to atlas images here"';
-    imageFiles = dir(fullfile(imageFolder, '*.jpg'));
-
+    % --- Setup Configuration ---
+    config = setupConfig();
+    % Initialization using the config file path
+    [protocolCounter, reRecordCount, runCount, lastSavedDate, unsuccessfulAttemptCount, animalName, animalSex, animalCond] = initializeRunCount(config);
+    % Verify folder existence and load images using config
+    imageFiles = dir(fullfile(config.imageFolder, config.atlasExtension)); 
+    if isempty(imageFiles)
+        error('No atlas image files found in the specified folder: %s. Check the path and file extension in config.', config.imageFolder);
+    end
     % Sort image files by number in the filename
     [sortedFiles, currentImageIndex] = sortImageFiles(imageFiles);
-
+    
+    if isempty(sortedFiles)
+        error('Could not sort any atlas files. Ensure filenames match the expected pattern (e.g., "1.234mm.jpg" or "-0.500mm.jpg").');
+    end
     % Create and display figure
     fig = figure;
     set(fig, 'KeyPressFcn', @keyPressed);
     displayImage(currentImageIndex);
-
     % Wait for user interaction
     uiwait(fig);
-
-    % KeyPress Function
+    % --- Nested Functions ---
     function keyPressed(~, event)
         switch event.Key
             case 'rightarrow'
@@ -32,208 +34,291 @@ function ephys_topography()
                     displayImage(currentImageIndex);
                 end
             case {'return', 'enter'}
-                % Load the current value of unsuccessfulAttemptCount from runCount.mat
-                data = load(runCountFilePath, 'unsuccessfulAttemptCount');
+                data = load(config.runCountFilePath, 'unsuccessfulAttemptCount');
                 unsuccessfulAttemptCount = data.unsuccessfulAttemptCount;
-
-                % Now pass unsuccessfulAttemptCount when calling selectImage
-                [protocolCounter, reRecordCount, runCount, unsuccessfulAttemptCount] = selectImage(currentImageIndex, protocolCounter, reRecordCount, runCount, lastSavedDate, sortedFiles, imageFolder, runCountFilePath, unsuccessfulAttemptCount);
+                % Pass the entire 'config' structure to selectImage
+                [protocolCounter, reRecordCount, runCount, unsuccessfulAttemptCount] = ...
+                    selectImage(currentImageIndex, protocolCounter, reRecordCount, runCount, lastSavedDate, ...
+                                sortedFiles, unsuccessfulAttemptCount, animalName, animalSex, animalCond, config); % Pass config
             otherwise
                 disp('Invalid key pressed. Use Enter key to select, right arrow to go forward, or left arrow to go to previous.');
         end
     end
-
-
-    % Display Image Function
     function displayImage(index)
-        img = imread(fullfile(imageFolder, sortedFiles(index).name));
+        % Use config for image folder path
+        img = imread(fullfile(config.imageFolder, sortedFiles(index).name));
         imshow(img);
-        title(['Image ', num2str(index), ' of ', num2str(length(sortedFiles)), ...
-            '. Press Enter to select this image, right arrow to go to next, left arrow to go to previous.']);
+        titleStr = sprintf('Image %d of %d. Press Enter to select, arrows to navigate.', ...
+                           index, length(sortedFiles));
+        title(titleStr);
+        
+        [~, coordinate, ~] = fileparts(sortedFiles(index).name);
+        
+        text(0.5, 0.95, coordinate, 'Units', 'normalized', ...
+             'HorizontalAlignment', 'center', 'VerticalAlignment', 'top', ...
+             'Color', 'white', 'FontSize', 16, 'FontWeight', 'bold', ...
+             'BackgroundColor', 'black', 'Margin', 2);
     end
 end
-
 %% selectImage Function
-function [protocolCounter, reRecordCount, runCount, unsuccessfulAttemptCount] = selectImage(index, protocolCounter, reRecordCount, runCount, lastSavedDate, sortedFiles, imageFolder, runCountFilePath, unsuccessfulAttemptCount)
-baseSaveFolder = 'C:\"path to save folder"';
-
-% Load the current unsuccessfulAttemptCount if it's not passed
-if nargin < 8 || isempty(unsuccessfulAttemptCount)
-    data = load(runCountFilePath, 'unsuccessfulAttemptCount');
-    unsuccessfulAttemptCount = data.unsuccessfulAttemptCount;
-end
-
-currentDate = datestr(now, 'mmddyyyy');
-selectedImage = imread(fullfile(imageFolder, sortedFiles(index).name));
-closeFigureIfExists(gcf); % Ensure no lingering figures
-fig = figure;
-imshow(selectedImage);
-title('Click on the approximate location of the cell');
-[xLocation, yLocation] = ginput(1);
-selectedImage = overlayRedDot(selectedImage, xLocation, yLocation);
-figure; imshow(selectedImage);
-pause(2); close(gcf);
-
-% Ask if the patch was successful
-patchSuccess = questdlg('Patch successful?', 'Patch Confirmation', 'Yes', 'No', 'Yes');
-if strcmp(patchSuccess, 'Yes')
-    disp('Patch Successful!');
-    % Increment runCount for a successful patch
-    runCount = runCount + 1;
-
-    % Ask if you want to proceed with recording or abort
-    proceedOrAbort = questdlg('Do you want to proceed with recording?', ...
-        'Proceed or Abort', 'Proceed', 'Abort', 'Proceed');
-
-    if strcmp(proceedOrAbort, 'Abort')
-        % Save to Unhealthy Cells with incremented runCount
-        disp('Patch aborted. Saving data to Unhealthy Cells folder...');
-        saveToUnhealthyCells(selectedImage, sortedFiles(index).name, runCount, baseSaveFolder, currentDate);
-
-        % Save updated runCount and protocol state before exiting
-        save(runCountFilePath, 'runCount', 'protocolCounter', 'reRecordCount', 'unsuccessfulAttemptCount', 'lastSavedDate');
-
-        % Ensure figure is closed before exiting
-        closeFigureIfExists(fig);
-        return; % Exit the function early without recording logic
+function [protocolCounter, reRecordCount, runCount, unsuccessfulAttemptCount] = selectImage(index, protocolCounter, reRecordCount, runCount, lastSavedDate, sortedFiles, unsuccessfulAttemptCount, animalName, animalSex, animalCond, config)
+    if nargin < 9 || isempty(unsuccessfulAttemptCount)
+        data = load(config.runCountFilePath, 'unsuccessfulAttemptCount');
+        unsuccessfulAttemptCount = data.unsuccessfulAttemptCount;
     end
-
-    % Proceed with recording logic
-    reRecord = true;
-    while reRecord
-        % Collect protocol data
-        [baselineInputs, rampInputs, spikingInputs, finalMembraneInputs] = promptForDataAndSave(selectedImage, sortedFiles(index).name, index, baseSaveFolder, protocolCounter, reRecordCount, runCount);
-
-        % Increment protocolCounter by 4 for each new recording session
-        protocolCounter = protocolCounter + 4;
-
-        % Ask if re-record is needed
-        reRecord = handleReRecordPrompt();
-        if reRecord
-            reRecordCount = reRecordCount + 1;
-        end
-    end
-
-    % Ask if the final recording was successful
-    recordSuccess = questdlg('Recording successful?', 'Recording Confirmation', 'Yes', 'No', 'Yes');
-    if strcmp(recordSuccess, 'Yes')
-        disp('Recording successful! Saving data to base folder...');
-        reRecordCount = 0; % Reset reRecordCount for the next cell
-
-        % Save the image and protocols
-        subfolderName = sprintf('Cell%d_%s_%s', runCount, sortedFiles(index).name(1:end-4), currentDate);
-        subfolderPath = fullfile(baseSaveFolder, currentDate, subfolderName);
-        imgWithText = applyTextOverlays(selectedImage, baselineInputs, rampInputs, spikingInputs, finalMembraneInputs, protocolCounter, runCount);
-        saveImageToFolder(subfolderPath, sortedFiles(index).name, imgWithText, runCount, currentDate);
-    else
-        % Save to Unhealthy Cells for unsuccessful recording
-        disp('Recording unsuccessful. Saving data to Unhealthy Cells folder...');
-
-        % Define the Unhealthy Cells folder path
-        unhealthyFolder = fullfile(baseSaveFolder, currentDate, 'Unhealthy Cells');
-        if ~exist(unhealthyFolder, 'dir')
-            mkdir(unhealthyFolder); % Create the folder if it doesn't exist
-        end
-
-        % Save the decoding file in the base folder first
-        subfolderName = sprintf('Cell%d_%s_%s', runCount, sortedFiles(index).name(1:end-4), currentDate);
-        subfolderPath = fullfile(baseSaveFolder, currentDate, subfolderName);
-        decodingFileName = fullfile(subfolderPath, sprintf('%s_decoding.txt', subfolderName));
-
-        % Ensure the decoding file exists before attempting to move it
-        if exist(decodingFileName, 'file')
-            % Move the decoding file to the Unhealthy Cells folder
-            movefile(decodingFileName, unhealthyFolder);
-        else
-            warning('Decoding file not found: %s', decodingFileName);
-        end
-
-        % Save the image to Unhealthy Cells with Failed Recording designation
-        saveToUnhealthyCells(selectedImage, sortedFiles(index).name, runCount, baseSaveFolder, currentDate, true, baselineInputs, rampInputs, spikingInputs, finalMembraneInputs, protocolCounter);
-
-        % Check if the original subfolder is empty and delete if it is
-        if exist(subfolderPath, 'dir')  % Ensure the subfolder exists
-            folderContents = dir(subfolderPath);  % Get folder contents
-            folderContents = folderContents(~ismember({folderContents.name}, {'.', '..'}));  % Remove '.' and '..'
-
-            if isempty(folderContents)  % Check if the folder is empty
-                rmdir(subfolderPath);  % Delete the empty subfolder
-            else
-                warning('The folder %s is not empty and cannot be deleted.', subfolderPath);
-            end
-        end
-    end
-else
-    % Patch unsuccessful: Save as an unsuccessful attempt
-    disp('Patch failed :(');
-    unsuccessfulAttemptCount = saveUnsuccessfulPatch(selectedImage, sortedFiles(index).name, runCountFilePath);
-end
-
-% Save state to runCount.mat
-save(runCountFilePath, 'runCount', 'protocolCounter', 'reRecordCount', 'unsuccessfulAttemptCount', 'lastSavedDate');
-closeFigureIfExists(fig);
-end
-
-%% Helper Functions
-function [protocolCounter, reRecordCount, runCount, lastSavedDate, unsuccessfulAttemptCount] = initializeRunCount(runCountFilePath)
-    % Get the current date
     currentDate = datestr(now, 'mmddyyyy');
+    % --- NEW: Create the new base folder name ---
+    baseDateFolder = sprintf('%s_%s%s_%s', currentDate, animalName, animalSex, animalCond);
+
+    selectedImage = imread(fullfile(config.imageFolder, sortedFiles(index).name)); 
     
-    % Check if the file exists
-    if exist(runCountFilePath, 'file')
-        % Load all variables in the file
-        data = load(runCountFilePath);
+    [~, selectedImageNameStem, ~] = fileparts(sortedFiles(index).name);
+    closeFigureIfExists(gcf);
+    fig = figure;
+    imshow(selectedImage);
+    title('Click on the approximate location of the cell');
+    [xLocation, yLocation] = ginput(1);
+    selectedImage = overlayRedDot(selectedImage, xLocation, yLocation);
+    figure; imshow(selectedImage);
+    pause(2); close(gcf);
+    patchSuccess = questdlg('Patch successful?', 'Patch Confirmation', 'Yes', 'No', 'Yes');
+    if strcmp(patchSuccess, 'Yes')
+        disp('Patch Successful!');
+        runCount = runCount + 1;
         
-        % Initialize missing variables
-        if ~isfield(data, 'protocolCounter')
-            protocolCounter = 0;
-        else
-            protocolCounter = data.protocolCounter;
+        proceedOrAbort = questdlg('Do you want to proceed with recording?', 'Proceed or Abort', 'Proceed', 'Abort', 'Proceed');
+        if strcmp(proceedOrAbort, 'Abort')
+            disp('Patch aborted. Saving image to Unhealthy Cells folder...');
+            % --- MODIFIED: Pass the new baseDateFolder ---
+            saveToUnhealthyCells(selectedImage, selectedImageNameStem, runCount, config.baseSaveFolder, baseDateFolder); 
+            save(config.runCountFilePath, 'runCount', 'protocolCounter', 'reRecordCount', 'unsuccessfulAttemptCount', 'lastSavedDate', 'animalName', 'animalSex', 'animalCond'); 
+            closeFigureIfExists(fig);
+            return;
         end
         
-        if ~isfield(data, 'reRecordCount')
-            reRecordCount = 0;
-        else
-            reRecordCount = data.reRecordCount;
+        % Initialize variables to store successful data and logs of failed attempts
+        baselineInputs = {}; rampInputs = {}; spikingInputs = {}; 
+        sEPSCInputs = {}; postExcitabilityInputs = {}; finalMembraneInputs = {};
+        failedExcitabilityLogs = {};
+        failed_sEPSC_Logs = {};
+        keepOuterLooping = true;
+        while keepOuterLooping
+            baseCounterForAttempt = protocolCounter;
+            sEPSCProtocolOffset = 0;
+            % --- Initial Data and Post-excitability Check ---
+            [currentBaseline, currentRamp, currentSpiking, baselineValues] = promptForInitialAndRampSpiking();
+            [currentPostExcitability, choice] = promptAndCheckProperties(baselineValues, 'Post-excitability Membrane Properties');
+            
+            if strcmp(choice, 'Re-record')
+                disp('Storing failed excitability attempt and re-recording...');
+                reRecordCount = reRecordCount + 1;
+                logEntry.baseCounter = baseCounterForAttempt;
+                logEntry.baselineInputs = currentBaseline;
+                logEntry.rampInputs = currentRamp;
+                logEntry.spikingInputs = currentSpiking;
+                logEntry.membraneInputs = currentPostExcitability;
+                failedExcitabilityLogs{end+1} = logEntry;
+                
+                protocolCounter = protocolCounter + 4;
+                save(config.runCountFilePath, 'runCount', 'protocolCounter', 'reRecordCount', 'unsuccessfulAttemptCount', 'lastSavedDate', 'animalName', 'animalSex', 'animalCond');
+                continue; 
+            elseif strcmp(choice, 'Abort')
+                disp('Aborting cell recording...');
+                subfolderName = sprintf('Cell%d_%s_%s_Aborted_PostExcitability', runCount, selectedImageNameStem, currentDate);
+                % --- MODIFIED: Use new baseDateFolder ---
+                abortedFolderPath = fullfile(config.baseSaveFolder, baseDateFolder, subfolderName);
+                if ~exist(abortedFolderPath, 'dir'); mkdir(abortedFolderPath); end
+                
+                decodingFileName = fullfile(abortedFolderPath, sprintf('%s_decoding.txt', subfolderName));
+                writeFinalDecodingFile(decodingFileName, true, runCount, animalName, animalSex, animalCond, currentDate, baseCounterForAttempt, 0, currentBaseline, currentRamp, currentSpiking, {}, currentPostExcitability, {}, {}, {});
+                imgWithText = applyTextOverlays(selectedImage, baseCounterForAttempt, 0, currentBaseline, currentRamp, currentSpiking, {}, currentPostExcitability, {}, runCount, animalName, animalSex, animalCond);
+                saveImageToFolder(abortedFolderPath, selectedImageNameStem, imgWithText, runCount, currentDate, 'Aborted_PostExcitability');
+                % --- MODIFIED: Use new baseDateFolder ---
+                unhealthyParentPath = fullfile(config.baseSaveFolder, baseDateFolder, 'Unhealthy Cells');
+                if ~exist(unhealthyParentPath, 'dir'); mkdir(unhealthyParentPath); end
+                movefile(abortedFolderPath, unhealthyParentPath);
+                protocolCounter = protocolCounter + 4;
+                save(config.runCountFilePath, 'runCount', 'protocolCounter', 'reRecordCount', 'unsuccessfulAttemptCount', 'lastSavedDate', 'animalName', 'animalSex', 'animalCond');
+                closeFigureIfExists(fig);
+                return;
+            end
+            
+            baselineInputs = currentBaseline;
+            rampInputs = currentRamp;
+            spikingInputs = currentSpiking;
+            postExcitabilityInputs = currentPostExcitability;
+            % --- sEPSC and Final Membrane Check ---
+            keepInnerLooping = true;
+            while keepInnerLooping
+                [current_sEPSCInputs] = createCustomDialog('sEPSC Recordings', {'sEPSCs at -70mV (Notes)', 'sEPSCs at -55mV (Notes)'});
+                [currentFinalMembrane, finalChoice] = promptAndCheckProperties(baselineValues, 'Final Membrane Properties');
+                switch finalChoice
+                    case 'Re-record'
+                        disp('Storing failed sEPSC attempt and re-recording...');
+                        reRecordCount = reRecordCount + 1;
+                        logEntry_sEPSC.baseCounter = protocolCounter;
+                        logEntry_sEPSC.membraneInputs = currentFinalMembrane;
+                        failed_sEPSC_Logs{end+1} = logEntry_sEPSC;
+                        sEPSCProtocolOffset = sEPSCProtocolOffset + 2;
+                        protocolCounter = protocolCounter + 2;
+                        save(config.runCountFilePath, 'runCount', 'protocolCounter', 'reRecordCount', 'unsuccessfulAttemptCount', 'lastSavedDate', 'animalName', 'animalSex', 'animalCond');
+                        continue; 
+                    case 'Abort'
+                        disp('Aborting cell after final check...');
+                        
+                        % --- CORRECTED FINAL ABORT LOGIC ---
+                        % 1. Create a descriptive folder for the aborted data
+                        subfolderName = sprintf('Cell%d_%s_%s_Aborted_FinalCheck', runCount, selectedImageNameStem, currentDate);
+                        % --- MODIFIED: Use new baseDateFolder ---
+                        abortedFolderPath = fullfile(config.baseSaveFolder, baseDateFolder, subfolderName);
+                        if ~exist(abortedFolderPath, 'dir'); mkdir(abortedFolderPath); end
+                        % 2. Write all available data to the decoding file
+                        decodingFileName = fullfile(abortedFolderPath, sprintf('%s_decoding.txt', subfolderName));
+                        sEPSCInputs = current_sEPSCInputs;
+                        finalMembraneInputs = currentFinalMembrane;
+                        writeFinalDecodingFile(decodingFileName, true, runCount, animalName, animalSex, animalCond, currentDate, baseCounterForAttempt, sEPSCProtocolOffset, baselineInputs, rampInputs, spikingInputs, sEPSCInputs, postExcitabilityInputs, finalMembraneInputs, failedExcitabilityLogs, failed_sEPSC_Logs);
+                        
+                        % 3. Generate and save the corresponding image
+                        imgWithText = applyTextOverlays(selectedImage, baseCounterForAttempt, sEPSCProtocolOffset, baselineInputs, rampInputs, spikingInputs, sEPSCInputs, postExcitabilityInputs, finalMembraneInputs, runCount, animalName, animalSex, animalCond);
+                        saveImageToFolder(abortedFolderPath, selectedImageNameStem, imgWithText, runCount, currentDate, 'Aborted_FinalCheck');
+                        
+                        % 4. Move the complete folder to Unhealthy Cells
+                        % --- MODIFIED: Use new baseDateFolder ---
+                        unhealthyParentPath = fullfile(config.baseSaveFolder, baseDateFolder, 'Unhealthy Cells');
+                        if ~exist(unhealthyParentPath, 'dir'); mkdir(unhealthyParentPath); end
+                        movefile(abortedFolderPath, unhealthyParentPath);
+                        
+                        % 5. Update counter and exit
+                        protocolCounter = baseCounterForAttempt + 6 + sEPSCProtocolOffset;
+                        save(config.runCountFilePath, 'runCount', 'protocolCounter', 'reRecordCount', 'unsuccessfulAttemptCount', 'lastSavedDate', 'animalName', 'animalSex', 'animalCond');
+                        closeFigureIfExists(fig);
+                        return;
+                    case 'Continue'
+                        sEPSCInputs = current_sEPSCInputs;
+                        finalMembraneInputs = currentFinalMembrane;
+                        keepInnerLooping = false;
+                end
+            end
+            
+            protocolCounter = baseCounterForAttempt + 6 + sEPSCProtocolOffset;
+            keepOuterLooping = false; 
         end
         
-        if ~isfield(data, 'runCount')
-            runCount = 0;
-        else
-            runCount = data.runCount;
-        end
+        % --- Final Write and Save ---
+        subfolderName = sprintf('Cell%d_%s_%s', runCount, selectedImageNameStem, currentDate);
+        % --- MODIFIED: Use new baseDateFolder ---
+        initialSubfolderPath = fullfile(config.baseSaveFolder, baseDateFolder, subfolderName);
+        if ~exist(initialSubfolderPath, 'dir'); mkdir(initialSubfolderPath); end
+        decodingFileName = fullfile(initialSubfolderPath, sprintf('%s_decoding.txt', subfolderName));
         
-        if ~isfield(data, 'lastSavedDate')
-            lastSavedDate = currentDate;  % Set to current date if missing
-        else
-            lastSavedDate = data.lastSavedDate;
-        end
+        writeFinalDecodingFile(decodingFileName, false, runCount, animalName, animalSex, animalCond, currentDate, baseCounterForAttempt, sEPSCProtocolOffset, baselineInputs, rampInputs, spikingInputs, sEPSCInputs, postExcitabilityInputs, finalMembraneInputs, failedExcitabilityLogs, failed_sEPSC_Logs);
         
-        if ~isfield(data, 'unsuccessfulAttemptCount')
-            unsuccessfulAttemptCount = 0;  % Initialize to 0 if missing
-        else
-            unsuccessfulAttemptCount = data.unsuccessfulAttemptCount;
-        end
+        recordSuccess = questdlg('Recording successful?', 'Recording Confirmation', 'Yes', 'No', 'Yes');
         
-        % Reset counters if the saved date differs from the current date
-        if ~strcmp(lastSavedDate, currentDate)
-            protocolCounter = 0;
-            reRecordCount = 0;
-            runCount = 0;
-            unsuccessfulAttemptCount = 0;  % Reset this as well
-            lastSavedDate = currentDate;
+        imgWithText = applyTextOverlays(selectedImage, baseCounterForAttempt, sEPSCProtocolOffset, baselineInputs, rampInputs, spikingInputs, sEPSCInputs, postExcitabilityInputs, finalMembraneInputs, runCount, animalName, animalSex, animalCond);
+        if strcmp(recordSuccess, 'Yes')
+            disp('Recording successful! Saving data to base folder...');
+            reRecordCount = 0; 
+            saveImageToFolder(initialSubfolderPath, selectedImageNameStem, imgWithText, runCount, currentDate);
+        else
+            disp('Recording unsuccessful. Moving data to Unhealthy Cells folder...');
+            % --- MODIFIED: Use new baseDateFolder ---
+            unhealthyParentPath = fullfile(config.baseSaveFolder, baseDateFolder, 'Unhealthy Cells');
+            if ~exist(unhealthyParentPath, 'dir'); mkdir(unhealthyParentPath); end
+            movefile(initialSubfolderPath, unhealthyParentPath);
+            finalUnhealthyCellPath = fullfile(unhealthyParentPath, subfolderName);
+            saveImageToFolder(finalUnhealthyCellPath, selectedImageNameStem, imgWithText, runCount, currentDate, 'FailedRecording');
         end
     else
-        % Initialize all variables if the file doesn't exist
+        disp('Patch failed :(');
+        % --- MODIFIED: Pass animal info to create correct folder name ---
+        unsuccessfulAttemptCount = saveUnsuccessfulPatch(selectedImage, selectedImageNameStem, config.runCountFilePath, config.baseSaveFolder, animalName, animalSex, animalCond);
+    end
+    
+    save(config.runCountFilePath, 'runCount', 'protocolCounter', 'reRecordCount', 'unsuccessfulAttemptCount', 'lastSavedDate', 'animalName', 'animalSex', 'animalCond');
+    closeFigureIfExists(fig);
+end
+%% Helper Functions
+%% Helper Functions
+function [protocolCounter, reRecordCount, runCount, lastSavedDate, unsuccessfulAttemptCount, animalName, animalSex, animalCond] = initializeRunCount(config)
+    currentDate = datestr(now, 'mmddyyyy');
+    runCountFilePath = config.runCountFilePath; % Get path from config
+
+    % Define conditions list
+    conditions = {"Baseline", "AIR-NS", "AIR-FSS", "CIE-NS", "CIE-FSS"};
+
+    if exist(runCountFilePath, 'file')
+        data = load(runCountFilePath);
+        % Load all data, providing defaults if fields are missing
+        protocolCounter = getFieldOrDefault(data, 'protocolCounter', 0);
+        reRecordCount = getFieldOrDefault(data, 'reRecordCount', 0);
+        runCount = getFieldOrDefault(data, 'runCount', 0);
+        lastSavedDate = getFieldOrDefault(data, 'lastSavedDate', currentDate);
+        unsuccessfulAttemptCount = getFieldOrDefault(data, 'unsuccessfulAttemptCount', 0);
+        animalName = getFieldOrDefault(data, 'animalName', '');
+        animalSex  = getFieldOrDefault(data, 'animalSex', '');
+        animalCond = getFieldOrDefault(data, 'animalCond', '');
+        
+        % Construct the expected folder path based on saved info
+        baseDateFolder = sprintf('%s_%s%s_%s', currentDate, animalName, animalSex, animalCond);
+        expectedFolderPath = fullfile(config.baseSaveFolder, baseDateFolder);
+
+        % --- NEW LOGIC ---
+        % Re-prompt if it's a new day OR if the user deleted the base folder for today
+        if ~strcmp(lastSavedDate, currentDate) || (isfield(data, 'animalName') && ~exist(expectedFolderPath, 'dir'))
+            if ~strcmp(lastSavedDate, currentDate)
+                % If it's a new day, reset all daily counters
+                protocolCounter = 0;
+                reRecordCount = 0;
+                runCount = 0;
+                unsuccessfulAttemptCount = 0;
+                lastSavedDate = currentDate;
+                disp('New day detected. Resetting daily counters and prompting for animal info.');
+            else
+                % If only the folder was deleted, just re-prompt for info
+                disp('Base folder not found. Prompting for new animal information.');
+            end
+            
+            % Prompt for new info in either case
+            [animalName, animalSex, animalCond] = promptForNewAnimalInfo(conditions);
+        end
+        
+    else
+        % If the runCount file doesn't exist at all, initialize everything
         protocolCounter = 0;
         reRecordCount = 0;
         runCount = 0;
         unsuccessfulAttemptCount = 0;
         lastSavedDate = currentDate;
+        [animalName, animalSex, animalCond] = promptForNewAnimalInfo(conditions);
     end
     
-    % Save the current state back to the file
-    save(runCountFilePath, 'runCount', 'protocolCounter', 'reRecordCount', 'lastSavedDate', 'unsuccessfulAttemptCount');
+    save(runCountFilePath, 'runCount', 'protocolCounter', 'reRecordCount', 'lastSavedDate', 'unsuccessfulAttemptCount', 'animalName', 'animalSex', 'animalCond');
+end
+
+function [name, sex, cond] = promptForNewAnimalInfo(conditions)
+    % This helper function encapsulates the dialogs for entering animal info
+    prompt = {'Enter animal name:', 'Enter animal sex (use M/F):'};
+    dlg_title = 'Enter Daily Animal Info';
+    answer = inputdlg(prompt, dlg_title, 1, {'',''});
+    
+    if ~isempty(answer)
+        name = answer{1};
+        sex  = answer{2};
+        
+        [indx, tf] = listdlg('ListString', conditions, 'SelectionMode', 'single', 'Name', 'Select Animal Condition', 'PromptString', 'Select the animal condition:');
+        if tf
+            cond = conditions{indx};
+        else
+            cond = '';
+            disp('Animal condition selection cancelled. Value set to empty.');
+        end
+    else
+        name = '';
+        sex = '';
+        cond = '';
+        disp('Animal info input cancelled. Values set to empty.');
+    end
 end
 
 function value = getFieldOrDefault(data, fieldName, defaultValue)
@@ -243,142 +328,130 @@ function value = getFieldOrDefault(data, fieldName, defaultValue)
         value = defaultValue;
     end
 end
-
-
 function closeFigureIfExists(f)
-    if isvalid(f)
+    if exist('f', 'var') && isvalid(f)
         close(f);
     end
 end
-
 function selectedImage = overlayRedDot(image, x, y)
     markerSize = 80;
     lineWidth = 10;
-    image = insertShape(image, 'FilledCircle', [x, y, markerSize / 2], 'Color', 'black', 'LineWidth', lineWidth);
-    image = insertShape(image, 'FilledCircle', [x, y, markerSize / 2 - lineWidth / 2], 'Color', [255, 0, 0], 'LineWidth', lineWidth);
+    image = insertShape(image, 'FilledCircle', [x, y, markerSize / 2], 'Color', 'black', 'Opacity', 1);
+    image = insertShape(image, 'FilledCircle', [x, y, markerSize / 2 - lineWidth], 'Color', [255, 0, 0], 'Opacity', 1);
     selectedImage = image;
 end
-
-function saveImageToFolder(folderPath, imageName, image, runCount, currentDate)
-    % Ensure the folder exists, if not, create it
+function saveImageToFolder(folderPath, imageNameStem, image, runCount, currentDate, nameSuffix)
+    if nargin < 6
+        nameSuffix = ''; % Default to no suffix
+    end
     if ~exist(folderPath, 'dir')
         mkdir(folderPath);
     end
-
-    % Construct the save name using the specified naming convention
-    saveName = sprintf('Cell%d_%s_%s.jpg', runCount, imageName(1:end-4), currentDate);
-
-    % Full path to the image file
+    
+    if isempty(nameSuffix)
+        saveName = sprintf('Cell%d_%s_%s.jpg', runCount, imageNameStem, currentDate);
+    else
+        saveName = sprintf('Cell%d_%s_%s_%s.jpg', runCount, imageNameStem, currentDate, nameSuffix);
+    end
     fullFileName = fullfile(folderPath, saveName);
-
-    % Save the image
     imwrite(image, fullFileName);
-
-    % Display a message confirming the saved image
-    disp(['Saved successful recording image as ', saveName]);
+    if isempty(nameSuffix)
+        disp(['Saved successful recording image as ', saveName]);
+    else
+        disp(['Saved unhealthy recording data to folder: ', folderPath]);
+    end
 end
-
-function unsuccessfulAttemptCount = saveUnsuccessfulPatch(selectedImage, selectedImageName, runCountFilePath)
-    baseSaveFolder = 'C:\"path to save folder"';
+% --- MODIFIED: Function signature updated to accept animal info ---
+function unsuccessfulAttemptCount = saveUnsuccessfulPatch(selectedImage, imageNameStem, runCountFilePath, baseSaveFolder, animalName, animalSex, animalCond)
     currentDate = datestr(now, 'mmddyyyy');
-    saveFolder = fullfile(baseSaveFolder, currentDate, 'Unsuccessful attempts');
+    % --- NEW: Create the new base folder name ---
+    baseDateFolder = sprintf('%s_%s%s_%s', currentDate, animalName, animalSex, animalCond);
+    % --- MODIFIED: Use the new baseDateFolder for the path ---
+    saveFolder = fullfile(baseSaveFolder, baseDateFolder, 'Unsuccessful attempts');
     
     if ~exist(saveFolder, 'dir')
         mkdir(saveFolder);
     end
     
-    % Load the current runCount and unsuccessfulAttemptCount
-    data = load(runCountFilePath, 'unsuccessfulAttemptCount', 'runCount');
+    if exist(runCountFilePath, 'file')
+        data = load(runCountFilePath, 'unsuccessfulAttemptCount');
+        currentUnsuccessfulCount = getFieldOrDefault(data, 'unsuccessfulAttemptCount', 0);
+    else
+        currentUnsuccessfulCount = 0;
+    end
     
-    % Increment the unsuccessful attempt count
-    unsuccessfulAttemptCount = data.unsuccessfulAttemptCount + 1;
+    unsuccessfulAttemptCount = currentUnsuccessfulCount + 1;
     
-    % Save the incremented unsuccessful attempt count
-    save(runCountFilePath, 'unsuccessfulAttemptCount', '-append');
-    
-    % Generate the save name with the updated unsuccessful attempt count
-    saveName = sprintf('Attempt%d_%s_%s.jpg', unsuccessfulAttemptCount, selectedImageName(1:end - 4), currentDate);
-    
-    % Save the image with the updated name
+    if exist(runCountFilePath, 'file')
+        allData = load(runCountFilePath);
+        allData.unsuccessfulAttemptCount = unsuccessfulAttemptCount;
+        save(runCountFilePath, '-struct', 'allData');
+    else
+        save(runCountFilePath, 'unsuccessfulAttemptCount');
+    end
+    saveName = sprintf('Attempt%d_%s_%s.jpg', unsuccessfulAttemptCount, imageNameStem, currentDate);
     imwrite(selectedImage, fullfile(saveFolder, saveName));
     disp(['Saved unsuccessful patch image as ', saveName]);
 end
-
 function protocolStart = calculateProtocolStart(protocolCounter)
-    % Calculate protocolStart based solely on protocolCounter
-    protocolStart = protocolCounter + 1;  % Ensure it starts at 1 (not 0) for proper numbering
+    protocolStart = protocolCounter + 1;
 end
-
 function inputs = createCustomDialogWithBaseline(dialogName, fields, baselineValues)
-    % Debugging: Display baseline values in the command window
     disp('Baseline values passed to the dialog:');
     disp(baselineValues);
-
-    % Create a dialog showing the baseline values alongside the input fields
     dialogWidth = 600;
-    dialogHeight = 50 + length(fields) * 40;  % Adjust height based on the number of fields
+    dialogHeight = 50 + length(fields) * 40;
     d = dialog('Position', [300, 300, dialogWidth, dialogHeight], 'Name', dialogName);
     fontSize = 10.5;
-
-    % Display baseline values for the first 3 fields (Series Resistance, Membrane Capacitance, Membrane Resistance)
+    inputFields = cell(1, length(fields));
     for i = 1:length(fields)
-        if i <= length(baselineValues)  % Only display baseline values for the first 3 fields
-            % Ensure baseline value exists and is correctly formatted for display
+        baselineText = '';
+        if i <= length(baselineValues) && ~isempty(baselineValues)
             if isnan(baselineValues(i))
                 baselineText = ' (Baseline: N/A)';
             else
                 baselineText = [' (Baseline: ', num2str(baselineValues(i)), ')'];
             end
-        else
-            baselineText = '';  % No baseline for the 'Notes' field
         end
-        % Debugging: Log which baseline is being assigned to which field
-        disp(['Assigning baseline to field ', num2str(i), ': ', baselineText]);
-
-        % Create the label with baseline information
-        uicontrol('Parent', d, 'Style', 'text', 'Position', [20, dialogHeight - 40 * i, 250, 20], ...
-            'String', [fields{i}, baselineText], 'FontSize', fontSize);
-        
-        % Create the input field
-        inputFields{i} = uicontrol('Parent', d, 'Style', 'edit', 'Position', [280, dialogHeight - 40 * i, 100, 22], 'FontSize', fontSize);
+        uicontrol('Parent', d, 'Style', 'text', 'Position', [20, dialogHeight - 40*i, 250, 20], ...
+            'String', [fields{i}, baselineText], 'FontSize', fontSize, 'HorizontalAlignment', 'left');
+        inputFields{i} = uicontrol('Parent', d, 'Style', 'edit', 'Position', [280, dialogHeight - 40*i, 100, 22], 'FontSize', fontSize);
     end
-
-    % Submit button
-    uicontrol('Parent', d, 'Style', 'pushbutton', 'Position', [400, 30, 100, 30], 'String', 'Submit', ...
+    uicontrol('Parent', d, 'Style', 'pushbutton', 'Position', [dialogWidth/2 - 50, 10, 100, 30], 'String', 'Submit', ...
         'FontSize', fontSize, 'Callback', @(~,~) uiresume(d));
-
-    uiwait(d);  % Wait for user input
-
-    % Capture the inputs
-    inputs = cellfun(@(x) get(x, 'String'), inputFields, 'UniformOutput', false);
-    delete(d);  % Close dialog after capturing inputs
+    uiwait(d);
+    if isvalid(d)
+        inputs = cellfun(@(x) get(x, 'String'), inputFields, 'UniformOutput', false);
+        delete(d);
+    else
+        inputs = cell(1, length(fields));
+        inputs(:) = {''};
+        disp('Dialog was closed before submitting.');
+    end
 end
-
 function inputs = createCustomDialog(dialogName, fields)
     dialogWidth = 500;
-    dialogHeight = 50 + length(fields) * 40;  % Adjust height based on the number of fields
+    dialogHeight = 50 + length(fields) * 40;
     d = dialog('Position', [300, 300, dialogWidth, dialogHeight], 'Name', dialogName);
     fontSize = 10.5;
-
-    % Create input fields dynamically based on the provided 'fields'
     inputFields = cell(1, length(fields));
     for i = 1:length(fields)
         uicontrol('Parent', d, 'Style', 'text', 'Position', [20, dialogHeight - 40*i, 200, 20], ...
-            'String', fields{i}, 'FontSize', fontSize);
+            'String', fields{i}, 'FontSize', fontSize, 'HorizontalAlignment', 'left');
         inputFields{i} = uicontrol('Parent', d, 'Style', 'edit', 'Position', [250, dialogHeight - 40*i, 100, 22], 'FontSize', fontSize);
     end
-
-    % Submit button
-    uicontrol('Parent', d, 'Style', 'pushbutton', 'Position', [350, 30, 100, 30], 'String', 'Submit', ...
+    uicontrol('Parent', d, 'Style', 'pushbutton', 'Position', [dialogWidth/2 - 50, 10, 100, 30], 'String', 'Submit', ...
         'FontSize', fontSize, 'Callback', @(~,~) uiresume(d));
-
-    uiwait(d);  % Wait for user input
-
-    % Capture the inputs
-    inputs = cellfun(@(x) get(x, 'String'), inputFields, 'UniformOutput', false);
-    delete(d);  % Close dialog after capturing inputs
+    uiwait(d);
+    if isvalid(d)
+        inputs = cellfun(@(x) get(x, 'String'), inputFields, 'UniformOutput', false);
+        delete(d);
+    else
+        inputs = cell(1, length(fields));
+        inputs(:) = {''};
+        disp('Dialog was closed before submitting.');
+    end
 end
-
 function reRecordNeeded = handleReRecordPrompt()
     reRecord = questdlg('Do you want to re-record?', 'Re-record', 'Yes', 'No', 'No');
     if strcmp(reRecord, 'Yes')
@@ -387,141 +460,207 @@ function reRecordNeeded = handleReRecordPrompt()
         reRecordNeeded = false;
     end
 end
-
-function saveToUnhealthyCells(image, imageName, runCount, baseSaveFolder, currentDate, addProtocol, baselineInputs, rampInputs, spikingInputs, finalMembraneInputs, protocolCounter)
-    % Handle optional arguments
-    if nargin < 6
-        addProtocol = false; % Default: no protocol overlays
-    end
-
-    unhealthyFolder = fullfile(baseSaveFolder, currentDate, 'Unhealthy Cells');
+% --- MODIFIED: Function signature updated to use baseDateFolder ---
+function saveToUnhealthyCells(image, imageNameStem, runCount, baseSaveFolder, baseDateFolder)
+    % --- MODIFIED: Path constructed with baseDateFolder ---
+    unhealthyFolder = fullfile(baseSaveFolder, baseDateFolder, 'Unhealthy Cells');
+    
     if ~exist(unhealthyFolder, 'dir')
-        mkdir(unhealthyFolder); % Create the folder if it doesn't exist
+        mkdir(unhealthyFolder);
     end
-
-    % Generate file name
-    if addProtocol
-        saveName = sprintf('Cell%d_%s_%s_FailedRecording.jpg', runCount, imageName(1:end-4), currentDate);
-        imgWithText = applyTextOverlays(image, baselineInputs, rampInputs, spikingInputs, finalMembraneInputs, protocolCounter, runCount);
-    else
-        saveName = sprintf('Cell%d_%s_%s_Aborted.jpg', runCount, imageName(1:end-4), currentDate);
-        imgWithText = image; % Save without overlays
-    end
-
-    % Save the image
-    imwrite(imgWithText, fullfile(unhealthyFolder, saveName));
-    disp(['Saved unhealthy cell image as ', saveName]);
+    
+    currentDate = datestr(now, 'mmddyyyy');
+    saveName = sprintf('Cell%d_%s_%s_Aborted.jpg', runCount, imageNameStem, currentDate);
+    
+    imwrite(image, fullfile(unhealthyFolder, saveName));
+    disp(['Saved aborted patch image as ', saveName]);
 end
-
-%% Write decoding file and print values
-
-% Collect baseline, ramp, spiking, and final membrane properties
-function [baselineInputs, rampInputs, spikingInputs, finalMembraneInputs] = promptForDataAndSave(selectedImage, selectedImageName, index, baseSaveFolder, protocolCounter, reRecordCount, runCount)
-
-    % Prompt for baseline membrane properties first
-    baselineInputs = createCustomDialog('Baseline Membrane Properties', {'Series Resistance (MΩ)', 'Membrane Capacitance (pF)', 'Membrane Resistance (MΩ)', 'Notes'});
+function [baselineInputs, rampInputs, spikingInputs, baselineValues] = promptForInitialAndRampSpiking()
+    baselineInputs = createCustomDialog('Baseline Membrane Properties', {'Series Resistance (MΩ)', 'Membrane Resistance (MΩ)', 'Membrane Capacitance (pF)', 'Notes'});
+    baselineValues = [];
+    if ~all(cellfun('isempty', baselineInputs(1:3)))
+        baselineValues = str2double(baselineInputs(1:3));
+        if any(isnan(baselineValues))
+             warning('Non-numeric input for baseline properties. Calculations might be affected.');
+             baselineValues = [];
+        end
+    else
+        disp('Baseline inputs are empty. Skipping baseline values for dialogs.');
+    end
     
-    % Save baseline inputs
-    baselineValues = str2double(baselineInputs(1:3)); % Assuming the first 3 fields are numeric
-    
-    % Continue with other data prompts
     rampInputs = createCustomDialog('Ramp Protocol', {'Ramp protocol held at (pA)', 'Ramp at natural RMP (mV)', 'Notes'});
     spikingInputs = createCustomDialog('Spiking Protocol', {'Spiking protocol held at (pA)', 'Spiking at natural RMP (mV)', 'Notes'});
+end
+function [inputs, choice] = promptAndCheckProperties(baselineValues, dialogTitle)
+    choice = 'Continue'; 
     
-    % Modify the final membrane input dialog to display baseline values
-    finalMembraneInputs = createCustomDialogWithBaseline('Final Membrane Properties', {'Series Resistance (MΩ)', 'Membrane Capacitance (pF)', 'Membrane Resistance (MΩ)', 'Notes'}, baselineValues);
-
-    % Compare final membrane properties with baseline values
-    finalValues = str2double(finalMembraneInputs(1:3));
-    percentChange = abs((finalValues - baselineValues) ./ baselineValues) * 100;
+    if ~isempty(baselineValues)
+        inputs = createCustomDialogWithBaseline(dialogTitle, ...
+            {'Series Resistance (MΩ)', 'Membrane Resistance (MΩ)', 'Membrane Capacitance (pF)', 'Notes'}, baselineValues);
+    else
+        inputs = createCustomDialog([dialogTitle, ' (No Baseline Ref)'], ...
+            {'Series Resistance (MΩ)', 'Membrane Resistance (MΩ)', 'Membrane Capacitance (pF)', 'Notes'});
+    end
     
-    % Check if any value has changed by more than 20%
-    if any(percentChange > 20)
-        warning('Some membrane properties have changed by more than 20%. Consider re-recording.');
+    if ~all(cellfun('isempty', inputs(1:3))) && ~isempty(baselineValues) && ~any(isnan(baselineValues))
+        finalValues = str2double(inputs(1:3));
+        if ~any(isnan(finalValues))
+            percentChange = abs((finalValues - baselineValues) ./ baselineValues) * 100;
+            if any(percentChange > 20)
+                user_choice = questdlg(sprintf('One or more properties changed by >20%%.\n\nSR Change: %.1f%%\nMR Change: %.1f%%\nMC Change: %.1f%%\n\nWhat would you like to do?', ...
+                    percentChange(1), percentChange(2), percentChange(3)), ...
+                    'Significant Change Detected', 'Continue Anyway', 'Re-record', 'Abort', 'Continue Anyway');
+                
+                switch user_choice
+                    case 'Re-record'
+                        choice = 'Re-record';
+                    case 'Abort'
+                        choice = 'Abort';
+                    case 'Continue Anyway'
+                        choice = 'Continue';
+                    case '' 
+                        choice = 'Abort';
+                end
+            end
+        else
+            warning('Non-numeric input for properties. Skipping percent change calculation.');
+        end
     end
-
-    % Ensure correct protocol numbers are saved based on protocolCounter and reRecordCount
-    protocolStart = calculateProtocolStart(protocolCounter);  % Use protocolCounter and reRecordCount for the start
-
-    % Write data to the decoding file
-    currentDate = datestr(now, 'mmddyyyy');
-    subfolderName = sprintf('Cell%d_%s_%s', runCount, selectedImageName(1:end-4), currentDate);
-    subfolderPath = fullfile(baseSaveFolder, currentDate, subfolderName);
-
-    % Ensure the folder exists before saving
-    if ~exist(subfolderPath, 'dir')
-        mkdir(subfolderPath);
-    end
-
-    decodingFileName = fullfile(subfolderPath, sprintf('%s_decoding.txt', subfolderName));
-
-    % Open the file for appending
-    fid = fopen(decodingFileName, 'a');
+end
+function writeFinalDecodingFile(decodingFileName, isAborted, runCount, animalName, animalSex, animalCond, currentDate, baseCounter, sEPSC_Offset, baselineInputs, rampInputs, spikingInputs, sEPSCInputs, postExcitabilityInputs, finalMembraneInputs, failedExcitabilityLogs, failed_sEPSC_Logs)
+    fid = fopen(decodingFileName, 'w');
     if fid == -1
-        error('Failed to open file: %s', decodingFileName);
+        error('Failed to open file for writing: %s', decodingFileName);
     end
-
-    % Write the protocol data
-    if ftell(fid) > 0
-        fprintf(fid, '\n---------------------------------------------\n');
+    if ~isempty(failedExcitabilityLogs) || ~isempty(failed_sEPSC_Logs)
+        fprintf(fid, 'NOTE: This cell was re-recorded due to membrane property drift. See FAILED ATTEMPT logs below for details.\n\n');
     end
-
-    fprintf(fid, '# Decoding File for Cell %d - Date: %s\n', runCount, currentDate);
+    fprintf(fid, '========================================================\n');
+    fprintf(fid, '--- FINAL SUCCESSFUL RECORDING DATA ---\n');
+    fprintf(fid, '========================================================\n');
+    % --- BUG FIX: Corrected format string to include animalCond ---
+    fprintf(fid, '# Decoding File for Cell %d - %s%s (%s) - Date: %s\n', runCount, animalName, animalSex, animalCond, currentDate);
     fprintf(fid, '---------------------------------------------\n');
+    
+    excitabilityStart = calculateProtocolStart(baseCounter);
+    sEPSC_Start = calculateProtocolStart(baseCounter + 4 + sEPSC_Offset);
     fprintf(fid, 'Current-clamped at -70mV:\n');
     fprintf(fid, 'File Name     Protocol Type     Current Injection (pA)\n');
     fprintf(fid, '---------------------------------------------\n');
-    fprintf(fid, '%03d          Ramp (I-clamp)     %s pA\n', protocolStart, rampInputs{1});
-    fprintf(fid, '%03d          Spiking (I-clamp)  %s pA\n', protocolStart + 2, spikingInputs{1});
+    fprintf(fid, '%03d          Ramp (I-clamp)     %s pA\n', excitabilityStart, rampInputs{1});
+    fprintf(fid, '%03d          Spiking (I-clamp)  %s pA\n', excitabilityStart + 2, spikingInputs{1});
     fprintf(fid, '\nNo Current Injection (RMP):\n');
     fprintf(fid, 'File Name     Protocol Type     RMP (mV)\n');
     fprintf(fid, '---------------------------------------------\n');
-    fprintf(fid, '%03d          Ramp (RMP)         %s mV\n', protocolStart + 1, rampInputs{2});
-    fprintf(fid, '%03d          Spiking (RMP)      %s mV\n', protocolStart + 3, spikingInputs{2});
-
-    % Baseline and final membrane properties
-    writeMembraneProperties(fid, 'Baseline Membrane Properties', baselineInputs);
-    writeMembraneProperties(fid, 'Final Membrane Properties', finalMembraneInputs);
+    fprintf(fid, '%03d          Ramp (RMP)         %s mV\n', excitabilityStart + 1, rampInputs{2});
+    fprintf(fid, '%03d          Spiking (RMP)      %s mV\n', excitabilityStart + 3, spikingInputs{2});
     
-    % Close the file
+    if ~isempty(sEPSCInputs)
+        fprintf(fid, '\nVoltage-clamped:\n');
+        fprintf(fid, 'File Name     Protocol Type         Holding Potential (mV)\n');
+        fprintf(fid, '--------------------------------------------------------\n');
+        fprintf(fid, '%03d          sEPSC                 -70 mV\n', sEPSC_Start);
+        fprintf(fid, '%03d          sEPSC                 -55 mV\n', sEPSC_Start + 1);
+    end
+    
+    writeMembraneProperties(fid, 'Baseline Membrane Properties', baselineInputs);
+    writeMembraneProperties(fid, 'Post-excitability Membrane Properties', postExcitabilityInputs);
+    if ~isempty(finalMembraneInputs)
+        writeMembraneProperties(fid, 'Final Membrane Properties', finalMembraneInputs);
+    end
+    
+    fprintf(fid, '\n--- Protocol-Specific Notes ---\n');
+    fprintf(fid, 'Ramp Notes: %s\n', rampInputs{3});
+    fprintf(fid, 'Spiking Notes: %s\n', spikingInputs{3});
+    if ~isempty(sEPSCInputs)
+        fprintf(fid, 'sEPSC @ -70mV Notes: %s\n', sEPSCInputs{1});
+        fprintf(fid, 'sEPSC @ -55mV Notes: %s\n', sEPSCInputs{2});
+    end
+    
+    if isAborted
+        fprintf(fid, '\n*** FINAL RECORDING ATTEMPT WAS ABORTED. ***\n');
+    end
+    for i = 1:length(failedExcitabilityLogs)
+        log = failedExcitabilityLogs{i};
+        protocolStart = calculateProtocolStart(log.baseCounter);
+        fprintf(fid, '\n\n--------------------------------------------------------');
+        fprintf(fid, '\n--- FAILED EXCITABILITY ATTEMPT (Protocols %03d-%03d) ---', protocolStart, protocolStart + 3);
+        fprintf(fid, '\n--- Reason: Unhealthy -- re-recorded ---\n');
+        writeMembraneProperties(fid, 'Baseline At Failure', log.baselineInputs);
+        writeMembraneProperties(fid, 'Post-excitability At Failure', log.membraneInputs);
+        fprintf(fid, '\nRamp Notes: %s\n', log.rampInputs{3});
+        fprintf(fid, 'Spiking Notes: %s\n', log.spikingInputs{3});
+        fprintf(fid, '\n--------------------------------------------------------');
+    end
+    for i = 1:length(failed_sEPSC_Logs)
+        log = failed_sEPSC_Logs{i};
+        protocolStart = calculateProtocolStart(log.baseCounter);
+        fprintf(fid, '\n\n--------------------------------------------------------');
+        fprintf(fid, '\n--- FAILED sEPSC ATTEMPT (Protocols %03d-%03d) ---', protocolStart + 4, protocolStart + 5);
+        fprintf(fid, '\n--- Reason: Unhealthy -- re-recorded ---\n');
+        writeMembraneProperties(fid, 'Final Properties At Failure', log.membraneInputs);
+        fprintf(fid, '\n--------------------------------------------------------');
+    end
     fclose(fid);
 end
-
-function imgWithText = applyTextOverlays(image, baselineInputs, rampInputs, spikingInputs, finalMembraneInputs, protocolCounter, runCount)
-% Construct the text for baseline membrane properties
-baselineText = sprintf('Baseline: SR: %s MΩ, MC: %s pF, MR: %s MΩ\nFinal: SR: %s MΩ, MC: %s pF, MR: %s MΩ', ...
-    baselineInputs{1}, baselineInputs{2}, baselineInputs{3}, ...
-    finalMembraneInputs{1}, finalMembraneInputs{2}, finalMembraneInputs{3});
-
-% Construct the text for ramp and spiking protocols using protocolStart
-rampSpikingText = sprintf('Ramp: %03d: I-clamp @ %s pA, %03d: RMP @ %s mV\nSpiking: %03d: I-clamp @ %s pA, %03d: RMP @ %s mV', ...
-    protocolCounter - 3, rampInputs{1}, protocolCounter - 2, rampInputs{2}, protocolCounter - 1, spikingInputs{1}, protocolCounter, spikingInputs{2});
-
-% Construct the title for the cell
-cellTitle = sprintf('Cell %d, %s', runCount, datestr(now, 'mmddyyyy'));
-
-% Add text overlays to the image
-imgWithText = insertText(image, [20, size(image, 1) - 200], baselineText, 'FontSize', 125, 'BoxOpacity', 0.4, 'AnchorPoint', 'LeftBottom');
-imgWithText = insertText(imgWithText, [size(image, 2) - 20, size(image, 1) - 200], rampSpikingText, 'FontSize', 125, 'BoxOpacity', 0.4, 'AnchorPoint', 'RightBottom');
-imgWithText = insertText(imgWithText, [size(image, 2) / 2, 100], cellTitle, 'FontSize', 200, 'BoxOpacity', 0, 'AnchorPoint', 'CenterTop');
+function imgWithText = applyTextOverlays(image, baseCounter, sEPSC_Offset, baselineInputs, rampInputs, spikingInputs, sEPSCInputs, postExcitabilityInputs, finalMembraneInputs, runCount, animalName, animalSex, animalCond)
+    if isempty(postExcitabilityInputs); postExcitabilityInputs = {'','','',''}; end
+    if isempty(finalMembraneInputs); finalMembraneInputs = {'','','',''}; end
+    membraneText = sprintf('Baseline: SR: %s MΩ, MR: %s MΩ, MC: %s pF\nPost-Excitability: SR: %s MΩ, MR: %s MΩ, MC: %s pF\nFinal: SR: %s MΩ, MR: %s MΩ, MC: %s pF', ...
+        baselineInputs{1}, baselineInputs{2}, baselineInputs{3}, ...
+        postExcitabilityInputs{1}, postExcitabilityInputs{2}, postExcitabilityInputs{3}, ...
+        finalMembraneInputs{1}, finalMembraneInputs{2}, finalMembraneInputs{3});
+    
+    excitabilityStart = baseCounter + 1;
+    sEPSC_Start = baseCounter + 5 + sEPSC_Offset;
+    rampSpikingText = sprintf('Ramp: %03d: I-clamp @ %s pA, %03d: RMP @ %s mV\nSpiking: %03d: I-clamp @ %s pA, %03d: RMP @ %s mV', ...
+        excitabilityStart, rampInputs{1}, excitabilityStart + 1, rampInputs{2}, ...
+        excitabilityStart + 2, spikingInputs{1}, excitabilityStart + 3, spikingInputs{2});
+    if isempty(sEPSCInputs)
+        sEPSCText = 'sEPSC: (Aborted)';
+    else
+        sEPSCText = sprintf('sEPSC: %03d @ -70mV, %03d @ -55mV', ...
+            sEPSC_Start, sEPSC_Start + 1);
+    end
+    
+    % --- BUG FIX: Corrected format string to include animalCond ---
+    animalInfoText = sprintf('%s%s (%s)', animalName, animalSex, animalCond); 
+    cellTitle = sprintf('Cell %d, %s, %s', runCount, animalInfoText, datestr(now, 'mmddyyyy'));
+    
+    imgWithText = insertText(image, [20, size(image, 1)-250], membraneText, 'FontSize', 125, 'BoxOpacity', 0.4, 'AnchorPoint', 'LeftBottom');
+    imgWithText = insertText(imgWithText, [size(image, 2)-20, size(image, 1)-300], rampSpikingText, 'FontSize', 125, 'BoxOpacity', 0.4, 'AnchorPoint', 'RightBottom');
+    imgWithText = insertText(imgWithText, [size(image, 2)-30, size(image, 1)-160], sEPSCText, 'FontSize', 125, 'BoxOpacity', 0.4, 'AnchorPoint', 'RightBottom');
+    imgWithText = insertText(imgWithText, [size(image, 2)/2, 100], cellTitle, 'FontSize', 200, 'BoxOpacity', 0, 'AnchorPoint', 'CenterTop');
 end
-
-
 function writeMembraneProperties(fid, sectionTitle, inputs)
-fprintf(fid, '%s:\n', sectionTitle);
-fprintf(fid, 'Series Resistance: %s MΩ\n', inputs{1});
-fprintf(fid, 'Membrane Capacitance: %s pF\n', inputs{2});
-fprintf(fid, 'Membrane Resistance: %s MΩ\n', inputs{3});
-fprintf(fid, 'Notes: %s\n\n', inputs{4});
+    fprintf(fid, '\n%s:\n', sectionTitle);
+    fprintf(fid, 'Series Resistance: %s MΩ\n', inputs{1});
+    fprintf(fid, 'Membrane Resistance: %s MΩ\n', inputs{2});
+    fprintf(fid, 'Membrane Capacitance: %s pF\n', inputs{3});
+    fprintf(fid, 'Notes: %s\n', inputs{4});
 end
-
-% Added missing sortImageFiles function
 function [sortedFiles, currentIndex] = sortImageFiles(files)
     fileNames = {files.name};
-    numbers = cellfun(@(x) sscanf(x, '%fmm.jpg'), fileNames, 'UniformOutput', false);
+    numbers = cellfun(@(x) sscanf(x, '%fmm'), fileNames, 'UniformOutput', false);
+    
+    validParse = ~cellfun('isempty', numbers);
+    
+    if ~any(validParse)
+        error('No atlas files matched the expected naming pattern (e.g., "NUMBERmm.ext") for sorting. Please check the atlas folder and filenames.');
+    end
+    
+    if ~all(validParse)
+        nonMatchingFiles = fileNames(~validParse);
+        warning('Some atlas filenames did not match the expected pattern and were ignored for sorting:\n%s', strjoin(nonMatchingFiles, '\n'));
+        files = files(validParse);
+        numbers = numbers(validParse);
+    end
+    
     numbersMat = cell2mat(numbers);
-    [~, sortedIdx] = sort(numbersMat, 'ascend');
+    [~, sortedIdx] = sort(numbersMat, 'descend');
     sortedFiles = files(sortedIdx);
     currentIndex = 1;
-
+    if isempty(sortedFiles)
+        error('Sorting resulted in an empty list of files. Please check atlas filenames.');
+    end
 end
